@@ -529,7 +529,6 @@ fn builtin_aliases() -> HashMap<String, String> {
         ("kimi", "moonshot-v1-128k"),
         ("minimax", "minimax-text-01"),
         // Kimi K2 aliases
-        ("kimi-k2", "kimi-k2"),
         ("kimi-coding", "kimi-k2"),
     ];
     pairs
@@ -2865,6 +2864,7 @@ mod tests {
         assert!(catalog.get_provider("moonshot").is_some());
         assert!(catalog.get_provider("qianfan").is_some());
         assert!(catalog.get_provider("bedrock").is_some());
+        assert!(catalog.get_provider("kimi-for-coding").is_some(), "kimi-for-coding provider missing");
     }
 
     #[test]
@@ -2945,5 +2945,24 @@ mod tests {
         for m in catalog.list_models() {
             assert!(seen.insert(m.id.clone()), "Duplicate model ID: {}", m.id);
         }
+    }
+
+    #[test]
+    fn test_kimi_for_coding_models() {
+        let catalog = ModelCatalog::new();
+        let provider = catalog.get_provider("kimi-for-coding").expect("kimi-for-coding missing");
+        let model_ids: Vec<&str> = catalog
+            .models_by_provider("kimi-for-coding")
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect();
+        assert!(model_ids.contains(&"kimi-k2"), "kimi-k2 missing");
+        assert!(model_ids.contains(&"kimi-k2-0905"), "kimi-k2-0905 missing");
+        assert!(model_ids.contains(&"kimi-k2-thinking"), "kimi-k2-thinking missing");
+        assert!(model_ids.contains(&"kimi-k2.5"), "kimi-k2.5 missing");
+        // Alias resolution
+        assert!(catalog.find_model("kimi-coding").is_some(), "kimi-coding alias missing");
+        // Base URL must be moonshot.ai (not .cn)
+        assert!(provider.base_url.contains("moonshot.ai"), "wrong base URL: {}", provider.base_url);
     }
 }

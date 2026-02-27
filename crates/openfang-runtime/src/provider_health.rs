@@ -41,8 +41,10 @@ const PROBE_TIMEOUT_SECS: u64 = 5;
 pub async fn probe_provider(provider: &str, base_url: &str) -> ProbeResult {
     let start = Instant::now();
 
+    // TODO 001: Disable redirect following to prevent SSRF via open-redirect chains.
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(PROBE_TIMEOUT_SECS))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
     {
         Ok(c) => c,

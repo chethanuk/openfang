@@ -212,7 +212,7 @@ function settingsPage() {
         this.providers = data.providers || [];
         for (var i = 0; i < this.providers.length; i++) {
           var p = this.providers[i];
-          if (p.is_local && p.base_url && !this.providerUrlInputs[p.id]) {
+          if (p.base_url && !this.providerUrlInputs[p.id]) {
             this.providerUrlInputs[p.id] = p.base_url;
           }
         }

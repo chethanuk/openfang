@@ -129,6 +129,9 @@ pub struct OpenFangKernel {
     pub whatsapp_gateway_pid: Arc<std::sync::Mutex<Option<u32>>>,
     /// Weak self-reference for trigger dispatch (set after Arc wrapping).
     self_handle: OnceLock<Weak<OpenFangKernel>>,
+    /// Runtime provider URL overrides — updated by the API without a full restart.
+    /// Takes precedence over `config.provider_urls` in `resolve_base_url`.
+    pub provider_url_overrides: dashmap::DashMap<String, String>,
 }
 
 /// Bounded in-memory delivery receipt tracker.
@@ -888,6 +891,7 @@ impl OpenFangKernel {
             booted_at: std::time::Instant::now(),
             whatsapp_gateway_pid: Arc::new(std::sync::Mutex::new(None)),
             self_handle: OnceLock::new(),
+            provider_url_overrides: dashmap::DashMap::new(),
         };
 
         // Restore persisted agents from SQLite
@@ -3466,11 +3470,13 @@ impl OpenFangKernel {
 
     /// Resolve the effective base URL for a provider, following the precedence chain:
     ///   1. `explicit_url` — per-agent manifest or default_model override (highest priority)
-    ///   2. `config.provider_urls[provider]` — provider-level override from config
-    ///   3. `None` — delegates to `create_driver` which uses hardcoded default
+    ///   2. `provider_url_overrides[provider]` — runtime overrides set via API (highest config priority)
+    ///   3. `config.provider_urls[provider]` — provider-level override from boot-time config
+    ///   4. `None` — delegates to `create_driver` which uses hardcoded default
     fn resolve_base_url(&self, explicit_url: Option<&str>, provider: &str) -> Option<String> {
         explicit_url
             .map(|u| u.to_string())
+            .or_else(|| self.provider_url_overrides.get(provider).map(|v| v.clone()))
             .or_else(|| self.config.provider_urls.get(provider).cloned())
     }
 

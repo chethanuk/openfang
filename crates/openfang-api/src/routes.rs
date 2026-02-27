@@ -5900,6 +5900,56 @@ pub async fn test_provider(
     }
 }
 
+/// TODO 001: Validate that a provider URL is not pointing to private/loopback/link-local
+/// addresses (SSRF protection). Returns `true` if the URL is safe to probe.
+fn is_safe_provider_url(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    match parsed.scheme() {
+        "http" | "https" => {}
+        _ => return false,
+    }
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    // Reject metadata IPs, loopback, private ranges
+    if let Ok(addr) = host.parse::<std::net::IpAddr>() {
+        use std::net::IpAddr;
+        match addr {
+            IpAddr::V4(v4) => {
+                if v4.is_loopback()
+                    || v4.is_private()
+                    || v4.is_link_local()
+                    || v4.is_broadcast()
+                    || v4.is_documentation()
+                {
+                    return false;
+                }
+                // Block AWS/GCP IMDS and CGNAT (RFC 6598)
+                let octets = v4.octets();
+                if octets[0] == 169 && octets[1] == 254 {
+                    return false;
+                }
+                if octets[0] == 100 && (64..=127).contains(&octets[1]) {
+                    return false;
+                }
+            }
+            IpAddr::V6(v6) => {
+                if v6.is_loopback() || v6.is_unspecified() {
+                    return false;
+                }
+            }
+        }
+    }
+    // Block localhost by name and .local mDNS domains
+    let host_lower = host.to_lowercase();
+    if host_lower == "localhost" || host_lower.ends_with(".local") {
+        return false;
+    }
+    true
+}
+
 /// PUT /api/providers/{name}/url — Set a custom base URL for a provider.
 pub async fn set_provider_url(
     State(state): State<Arc<AppState>>,
@@ -5940,6 +5990,14 @@ pub async fn set_provider_url(
         );
     }
 
+    // TODO 001: SSRF protection — reject private/loopback/link-local addresses.
+    if !is_safe_provider_url(&base_url) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "base_url must not point to a private, loopback, or link-local address"})),
+        );
+    }
+
     // Strip trailing slash to prevent double-slash in concatenated paths
     let base_url = base_url.trim_end_matches('/').to_string();
 
@@ -5952,6 +6010,13 @@ pub async fn set_provider_url(
             .unwrap_or_else(|e| e.into_inner());
         catalog.set_provider_url(&name, &base_url);
     }
+
+    // TODO 002: Update in-memory runtime override map so resolve_base_url() reflects
+    // the new URL immediately, without requiring a daemon restart.
+    state
+        .kernel
+        .provider_url_overrides
+        .insert(name.clone(), base_url.clone());
 
     // Persist to config.toml [provider_urls] section
     let config_path = state.kernel.config.home_dir.join("config.toml");
@@ -5978,46 +6043,61 @@ pub async fn set_provider_url(
     )
 }
 
-/// Upsert a provider URL in the `[provider_urls]` section of config.toml.
+/// TODO 004 + TODO 008: Upsert a provider URL in the `[provider_urls]` section of
+/// config.toml. Uses `toml_edit` to preserve existing comments and formatting, and
+/// `tempfile::NamedTempFile` for atomic writes with 0o600 permissions on Unix.
 fn upsert_provider_url(
     config_path: &std::path::Path,
     provider: &str,
     url: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write as _;
+    use toml_edit::DocumentMut;
+
     let content = if config_path.exists() {
         std::fs::read_to_string(config_path)?
     } else {
         String::new()
     };
 
-    let mut doc: toml::Value = if content.trim().is_empty() {
-        toml::Value::Table(toml::map::Map::new())
+    // TODO 008: Parse with toml_edit to preserve comments and key ordering.
+    let mut doc: DocumentMut = if content.trim().is_empty() {
+        DocumentMut::new()
     } else {
-        toml::from_str(&content)?
+        content
+            .parse::<DocumentMut>()
+            .map_err(|e| format!("invalid TOML: {e}"))?
     };
 
-    let root = doc.as_table_mut().ok_or("Config is not a TOML table")?;
-
-    if !root.contains_key("provider_urls") {
-        root.insert(
-            "provider_urls".to_string(),
-            toml::Value::Table(toml::map::Map::new()),
-        );
+    // Ensure [provider_urls] table exists before inserting.
+    if doc.get("provider_urls").is_none() {
+        doc["provider_urls"] = toml_edit::Item::Table(toml_edit::Table::new());
     }
-    let urls_table = root
-        .get_mut("provider_urls")
-        .and_then(|v| v.as_table_mut())
-        .ok_or("provider_urls is not a table")?;
-
-    urls_table.insert(provider.to_string(), toml::Value::String(url.to_string()));
+    doc["provider_urls"][provider] = toml_edit::value(url);
 
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    let tmp_path = config_path.with_extension("toml.tmp");
-    std::fs::write(&tmp_path, toml::to_string_pretty(&doc)?)?;
-    std::fs::rename(&tmp_path, config_path)?;
+    // TODO 004: Atomic write via NamedTempFile in the same directory (same filesystem),
+    // ensuring the rename is atomic. Set 0o600 permissions on Unix before persisting.
+    let config_dir = config_path
+        .parent()
+        .ok_or("config path has no parent directory")?;
+    let mut tmp = tempfile::NamedTempFile::new_in(config_dir)
+        .map_err(|e| format!("failed to create temp file: {e}"))?;
+    tmp.write_all(doc.to_string().as_bytes())
+        .map_err(|e| format!("failed to write temp file: {e}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("failed to set permissions: {e}"))?;
+    }
+
+    tmp.persist(config_path)
+        .map_err(|e| format!("failed to persist config: {e}"))?;
     Ok(())
 }
 

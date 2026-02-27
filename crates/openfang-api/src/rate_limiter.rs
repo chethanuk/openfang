@@ -30,6 +30,12 @@ pub fn operation_cost(method: &str, path: &str) -> NonZeroU32 {
         ("POST", "/api/skills/install") => NonZeroU32::new(50).unwrap(),
         ("POST", "/api/skills/uninstall") => NonZeroU32::new(10).unwrap(),
         ("POST", "/api/migrate") => NonZeroU32::new(100).unwrap(),
+        // TODO 007: Higher cost for provider URL changes — each call triggers an HTTP probe
+        // to an external host and writes to disk. 50 tokens discourages brute-force SSRF
+        // scanning while still allowing legitimate reconfiguration within a minute.
+        ("PUT", p) if p.starts_with("/api/providers/") && p.ends_with("/url") => {
+            NonZeroU32::new(50).unwrap()
+        }
         ("PUT", p) if p.contains("/update") => NonZeroU32::new(10).unwrap(),
         _ => NonZeroU32::new(5).unwrap(),
     }
