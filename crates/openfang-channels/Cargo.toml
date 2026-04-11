@@ -38,7 +38,8 @@ lettre = { workspace = true }
 imap = { workspace = true }
 native-tls = { workspace = true }
 mailparse = { workspace = true }
-rumqttc = { workspace = true }
+# Temporarily disabled due to upstream RUSTSEC-2025-0134 in rustls-pemfile via rumqttc
+# rumqttc = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
